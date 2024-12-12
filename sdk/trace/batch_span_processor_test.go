@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package trace_test
 
@@ -26,6 +15,7 @@ import (
 
 	ottest "go.opentelemetry.io/otel/sdk/internal/internaltest"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -339,7 +329,7 @@ func TestBatchSpanProcessorExportTimeout(t *testing.T) {
 	generateSpan(t, tr, testOption{genNumSpans: 1})
 	tp.UnregisterSpanProcessor(bsp)
 
-	if exp.err != context.DeadlineExceeded {
+	if !errors.Is(exp.err, context.DeadlineExceeded) {
 		t.Errorf("context deadline error not returned: got %+v", exp.err)
 	}
 }
@@ -350,7 +340,7 @@ func createAndRegisterBatchSP(option testOption, te *testBatchExporter) sdktrace
 	return sdktrace.NewBatchSpanProcessor(te, options...)
 }
 
-func generateSpan(t *testing.T, tr trace.Tracer, option testOption) {
+func generateSpan(_ *testing.T, tr trace.Tracer, option testOption) {
 	sc := getSpanContext()
 
 	for i := 0; i < option.genNumSpans; i++ {
@@ -363,7 +353,7 @@ func generateSpan(t *testing.T, tr trace.Tracer, option testOption) {
 	}
 }
 
-func generateSpanParallel(t *testing.T, tr trace.Tracer, option testOption) {
+func generateSpanParallel(_ *testing.T, tr trace.Tracer, option testOption) {
 	sc := getSpanContext()
 
 	wg := &sync.WaitGroup{}
@@ -637,27 +627,39 @@ func TestBatchSpanProcessorConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
-func BenchmarkSpanProcessor(b *testing.B) {
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(
-			tracetest.NewNoopExporter(),
-			sdktrace.WithMaxExportBatchSize(10),
-		))
-	tracer := tp.Tracer("bench")
-	ctx := context.Background()
+func BenchmarkSpanProcessorOnEnd(b *testing.B) {
+	for _, bb := range []struct {
+		batchSize  int
+		spansCount int
+	}{
+		{batchSize: 10, spansCount: 10},
+		{batchSize: 10, spansCount: 100},
+		{batchSize: 100, spansCount: 10},
+		{batchSize: 100, spansCount: 100},
+	} {
+		b.Run(fmt.Sprintf("batch: %d, spans: %d", bb.batchSize, bb.spansCount), func(b *testing.B) {
+			bsp := sdktrace.NewBatchSpanProcessor(
+				tracetest.NewNoopExporter(),
+				sdktrace.WithMaxExportBatchSize(bb.batchSize),
+			)
+			snap := tracetest.SpanStub{}.Snapshot()
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		for j := 0; j < 10; j++ {
-			_, span := tracer.Start(ctx, "bench")
-			span.End()
-		}
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				// Ensure the export happens for every run
+				for j := 0; j < bb.spansCount; j++ {
+					bsp.OnEnd(snap)
+				}
+			}
+		})
 	}
 }
 
 func BenchmarkSpanProcessorVerboseLogging(b *testing.B) {
+	b.Cleanup(func(l logr.Logger) func() {
+		return func() { global.SetLogger(l) }
+	}(global.GetLogger()))
 	global.SetLogger(funcr.New(func(prefix, args string) {}, funcr.Options{Verbosity: 5}))
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(

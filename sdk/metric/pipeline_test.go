@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric // import "go.opentelemetry.io/otel/sdk/metric"
 
@@ -19,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -31,10 +22,14 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
+	"go.opentelemetry.io/otel/sdk/metric/internal/aggregate"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func testSumAggregateOutput(dest *metricdata.Aggregation) int {
@@ -47,13 +42,13 @@ func testSumAggregateOutput(dest *metricdata.Aggregation) int {
 }
 
 func TestNewPipeline(t *testing.T) {
-	pipe := newPipeline(nil, nil, nil)
+	pipe := newPipeline(nil, nil, nil, exemplar.AlwaysOffFilter)
 
 	output := metricdata.ResourceMetrics{}
 	err := pipe.produce(context.Background(), &output)
 	require.NoError(t, err)
 	assert.Equal(t, resource.Empty(), output.Resource)
-	assert.Len(t, output.ScopeMetrics, 0)
+	assert.Empty(t, output.ScopeMetrics)
 
 	iSync := instrumentSync{"name", "desc", "1", testSumAggregateOutput}
 	assert.NotPanics(t, func() {
@@ -73,7 +68,7 @@ func TestNewPipeline(t *testing.T) {
 
 func TestPipelineUsesResource(t *testing.T) {
 	res := resource.NewWithAttributes("noSchema", attribute.String("test", "resource"))
-	pipe := newPipeline(res, nil, nil)
+	pipe := newPipeline(res, nil, nil, exemplar.AlwaysOffFilter)
 
 	output := metricdata.ResourceMetrics{}
 	err := pipe.produce(context.Background(), &output)
@@ -82,7 +77,7 @@ func TestPipelineUsesResource(t *testing.T) {
 }
 
 func TestPipelineConcurrentSafe(t *testing.T) {
-	pipe := newPipeline(nil, nil, nil)
+	pipe := newPipeline(nil, nil, nil, exemplar.AlwaysOffFilter)
 	ctx := context.Background()
 	var output metricdata.ResourceMetrics
 
@@ -108,6 +103,21 @@ func TestPipelineConcurrentSafe(t *testing.T) {
 			defer wg.Done()
 			pipe.addMultiCallback(func(context.Context) error { return nil })
 		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b := aggregate.Builder[int64]{
+				Temporality:      metricdata.CumulativeTemporality,
+				ReservoirFunc:    nil,
+				AggregationLimit: 0,
+			}
+			var oID observableID[int64]
+			m, _ := b.PrecomputedSum(false)
+			measures := []aggregate.Measure[int64]{}
+			measures = append(measures, m)
+			pipe.addInt64Measure(oID, measures)
+		}()
 	}
 	wg.Wait()
 }
@@ -132,13 +142,13 @@ func testDefaultViewImplicit[N int64 | float64]() func(t *testing.T) {
 		}{
 			{
 				name: "NoView",
-				pipe: newPipeline(nil, reader, nil),
+				pipe: newPipeline(nil, reader, nil, exemplar.AlwaysOffFilter),
 			},
 			{
 				name: "NoMatchingView",
 				pipe: newPipeline(nil, reader, []View{
 					NewView(Instrument{Name: "foo"}, Stream{Name: "bar"}),
-				}),
+				}, exemplar.AlwaysOffFilter),
 			},
 		}
 
@@ -146,7 +156,8 @@ func testDefaultViewImplicit[N int64 | float64]() func(t *testing.T) {
 			t.Run(test.name, func(t *testing.T) {
 				var c cache[string, instID]
 				i := newInserter[N](test.pipe, &c)
-				got, err := i.Instrument(inst)
+				readerAggregation := i.readerDefaultAggregation(inst.Kind)
+				got, err := i.Instrument(inst, readerAggregation)
 				require.NoError(t, err)
 				assert.Len(t, got, 1, "default view not applied")
 				for _, in := range got {
@@ -222,7 +233,7 @@ func TestLogConflictName(t *testing.T) {
 			return instID{Name: tc.existing}
 		})
 
-		i := newInserter[int64](newPipeline(nil, nil, nil), &vc)
+		i := newInserter[int64](newPipeline(nil, nil, nil, exemplar.AlwaysOffFilter), &vc)
 		i.logConflict(instID{Name: tc.name})
 
 		if tc.conflict {
@@ -233,7 +244,7 @@ func TestLogConflictName(t *testing.T) {
 			)
 		} else {
 			assert.Equalf(
-				t, msg, "",
+				t, "", msg,
 				"warning logged for non-conflicting names: %s, %s",
 				tc.existing, tc.name,
 			)
@@ -264,7 +275,7 @@ func TestLogConflictSuggestView(t *testing.T) {
 	var vc cache[string, instID]
 	name := strings.ToLower(orig.Name)
 	_ = vc.Lookup(name, func() instID { return orig })
-	i := newInserter[int64](newPipeline(nil, nil, nil), &vc)
+	i := newInserter[int64](newPipeline(nil, nil, nil, exemplar.AlwaysOffFilter), &vc)
 
 	viewSuggestion := func(inst instID, stream string) string {
 		return `"NewView(Instrument{` +
@@ -369,10 +380,11 @@ func TestInserterCachedAggregatorNameConflict(t *testing.T) {
 	}
 
 	var vc cache[string, instID]
-	pipe := newPipeline(nil, NewManualReader(), nil)
+	pipe := newPipeline(nil, NewManualReader(), nil, exemplar.AlwaysOffFilter)
 	i := newInserter[int64](pipe, &vc)
 
-	_, origID, err := i.cachedAggregator(scope, kind, stream)
+	readerAggregation := i.readerDefaultAggregation(kind)
+	_, origID, err := i.cachedAggregator(scope, kind, stream, readerAggregation)
 	require.NoError(t, err)
 
 	require.Len(t, pipe.aggregations, 1)
@@ -382,7 +394,7 @@ func TestInserterCachedAggregatorNameConflict(t *testing.T) {
 	require.Equal(t, name, iSync[0].name)
 
 	stream.Name = "RequestCount"
-	_, id, err := i.cachedAggregator(scope, kind, stream)
+	_, id, err := i.cachedAggregator(scope, kind, stream, readerAggregation)
 	require.NoError(t, err)
 	assert.Equal(t, origID, id, "multiple aggregators for equivalent name")
 
@@ -391,4 +403,213 @@ func TestInserterCachedAggregatorNameConflict(t *testing.T) {
 	iSync = pipe.aggregations[scope]
 	require.Len(t, iSync, 1, "registered instrumentSync changed")
 	assert.Equal(t, name, iSync[0].name, "stream name changed")
+}
+
+func TestExemplars(t *testing.T) {
+	nCPU := runtime.NumCPU()
+	setup := func(name string) (metric.Meter, Reader) {
+		r := NewManualReader()
+		v := NewView(Instrument{Name: "int64-expo-histogram"}, Stream{
+			Aggregation: AggregationBase2ExponentialHistogram{
+				MaxSize:  160, // > 20, reservoir size should default to 20.
+				MaxScale: 20,
+			},
+		})
+		return NewMeterProvider(WithReader(r), WithView(v)).Meter(name), r
+	}
+
+	measure := func(ctx context.Context, m metric.Meter) {
+		i, err := m.Int64Counter("int64-counter")
+		require.NoError(t, err)
+
+		h, err := m.Int64Histogram("int64-histogram")
+		require.NoError(t, err)
+
+		e, err := m.Int64Histogram("int64-expo-histogram")
+		require.NoError(t, err)
+
+		for j := 0; j < 20*nCPU; j++ { // will be >= 20 and > nCPU
+			i.Add(ctx, 1)
+			h.Record(ctx, 1)
+			e.Record(ctx, 1)
+		}
+	}
+
+	check := func(t *testing.T, r Reader, nSum, nHist, nExpo int) {
+		t.Helper()
+
+		rm := new(metricdata.ResourceMetrics)
+		require.NoError(t, r.Collect(context.Background(), rm))
+
+		require.Len(t, rm.ScopeMetrics, 1, "ScopeMetrics")
+		sm := rm.ScopeMetrics[0]
+		require.Len(t, sm.Metrics, 3, "Metrics")
+
+		require.IsType(t, metricdata.Sum[int64]{}, sm.Metrics[0].Data, sm.Metrics[0].Name)
+		sum := sm.Metrics[0].Data.(metricdata.Sum[int64])
+		assert.Len(t, sum.DataPoints[0].Exemplars, nSum)
+
+		require.IsType(t, metricdata.Histogram[int64]{}, sm.Metrics[1].Data, sm.Metrics[1].Name)
+		hist := sm.Metrics[1].Data.(metricdata.Histogram[int64])
+		assert.Len(t, hist.DataPoints[0].Exemplars, nHist)
+
+		require.IsType(t, metricdata.ExponentialHistogram[int64]{}, sm.Metrics[2].Data, sm.Metrics[2].Name)
+		expo := sm.Metrics[2].Data.(metricdata.ExponentialHistogram[int64])
+		assert.Len(t, expo.DataPoints[0].Exemplars, nExpo)
+	}
+
+	ctx := context.Background()
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		SpanID:     trace.SpanID{0o1},
+		TraceID:    trace.TraceID{0o1},
+		TraceFlags: trace.FlagsSampled,
+	})
+	sampled := trace.ContextWithSpanContext(context.Background(), sc)
+
+	t.Run("Default", func(t *testing.T) {
+		m, r := setup("default")
+		measure(ctx, m)
+		check(t, r, 0, 0, 0)
+
+		measure(sampled, m)
+		check(t, r, nCPU, 1, 20)
+	})
+
+	t.Run("Invalid", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "unrecognized")
+		m, r := setup("default")
+		measure(ctx, m)
+		check(t, r, 0, 0, 0)
+
+		measure(sampled, m)
+		check(t, r, nCPU, 1, 20)
+	})
+
+	t.Run("always_on", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "always_on")
+		m, r := setup("always_on")
+		measure(ctx, m)
+		check(t, r, nCPU, 1, 20)
+	})
+
+	t.Run("always_off", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "always_off")
+		m, r := setup("always_off")
+		measure(ctx, m)
+		check(t, r, 0, 0, 0)
+	})
+
+	t.Run("trace_based", func(t *testing.T) {
+		t.Setenv("OTEL_METRICS_EXEMPLAR_FILTER", "trace_based")
+		m, r := setup("trace_based")
+		measure(ctx, m)
+		check(t, r, 0, 0, 0)
+
+		measure(sampled, m)
+		check(t, r, nCPU, 1, 20)
+	})
+
+	t.Run("Custom reservoir", func(t *testing.T) {
+		r := NewManualReader()
+		reservoirProviderSelector := func(agg Aggregation) exemplar.ReservoirProvider {
+			return exemplar.FixedSizeReservoirProvider(2)
+		}
+		v1 := NewView(Instrument{Name: "int64-expo-histogram"}, Stream{
+			Aggregation: AggregationBase2ExponentialHistogram{
+				MaxSize:  160, // > 20, reservoir size should default to 20.
+				MaxScale: 20,
+			},
+			ExemplarReservoirProviderSelector: reservoirProviderSelector,
+		})
+		v2 := NewView(Instrument{Name: "int64-counter"}, Stream{
+			ExemplarReservoirProviderSelector: reservoirProviderSelector,
+		})
+		v3 := NewView(Instrument{Name: "int64-histogram"}, Stream{
+			ExemplarReservoirProviderSelector: reservoirProviderSelector,
+		})
+		m := NewMeterProvider(WithReader(r), WithView(v1, v2, v3)).Meter("custom-reservoir")
+		measure(ctx, m)
+		check(t, r, 0, 0, 0)
+
+		measure(sampled, m)
+		check(t, r, 2, 2, 2)
+	})
+}
+
+func TestAddingAndObservingMeasureConcurrentSafe(t *testing.T) {
+	r1 := NewManualReader()
+	r2 := NewManualReader()
+
+	mp := NewMeterProvider(WithReader(r1), WithReader(r2))
+	m := mp.Meter("test")
+
+	oc1, err := m.Int64ObservableCounter("int64-observable-counter")
+	require.NoError(t, err)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := m.Int64ObservableCounter("int64-observable-counter-2")
+		require.NoError(t, err)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := m.RegisterCallback(
+			func(_ context.Context, o metric.Observer) error {
+				o.ObserveInt64(oc1, 2)
+				return nil
+			}, oc1)
+		require.NoError(t, err)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = mp.pipes[0].produce(context.Background(), &metricdata.ResourceMetrics{})
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = mp.pipes[1].produce(context.Background(), &metricdata.ResourceMetrics{})
+	}()
+
+	wg.Wait()
+}
+
+func TestPipelineWithMultipleReaders(t *testing.T) {
+	r1 := NewManualReader()
+	r2 := NewManualReader()
+	mp := NewMeterProvider(WithReader(r1), WithReader(r2))
+	m := mp.Meter("test")
+	var val atomic.Int64
+	oc, err := m.Int64ObservableCounter("int64-observable-counter")
+	require.NoError(t, err)
+	reg, err := m.RegisterCallback(
+		// SDK calls this function when collecting data.
+		func(_ context.Context, o metric.Observer) error {
+			o.ObserveInt64(oc, val.Load())
+			return nil
+		}, oc)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, reg.Unregister()) })
+	ctx := context.Background()
+	rm := new(metricdata.ResourceMetrics)
+	val.Add(1)
+	err = r1.Collect(ctx, rm)
+	require.NoError(t, err)
+	if assert.Len(t, rm.ScopeMetrics, 1) &&
+		assert.Len(t, rm.ScopeMetrics[0].Metrics, 1) {
+		assert.Equal(t, int64(1), rm.ScopeMetrics[0].Metrics[0].Data.(metricdata.Sum[int64]).DataPoints[0].Value)
+	}
+	val.Add(1)
+	err = r2.Collect(ctx, rm)
+	require.NoError(t, err)
+	if assert.Len(t, rm.ScopeMetrics, 1) &&
+		assert.Len(t, rm.ScopeMetrics[0].Metrics, 1) {
+		assert.Equal(t, int64(2), rm.ScopeMetrics[0].Metrics[0].Data.(metricdata.Sum[int64]).DataPoints[0].Value)
+	}
 }

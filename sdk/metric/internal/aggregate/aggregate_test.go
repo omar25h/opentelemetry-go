@@ -1,22 +1,12 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package aggregate // import "go.opentelemetry.io/otel/sdk/metric/internal/aggregate"
 
 import (
 	"context"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +21,15 @@ var (
 	keyUser    = "user"
 	userAlice  = attribute.String(keyUser, "Alice")
 	userBob    = attribute.String(keyUser, "Bob")
+	userCarol  = attribute.String(keyUser, "Carol")
+	userDave   = attribute.String(keyUser, "Dave")
 	adminTrue  = attribute.Bool("admin", true)
 	adminFalse = attribute.Bool("admin", false)
 
 	alice = attribute.NewSet(userAlice, adminTrue)
 	bob   = attribute.NewSet(userBob, adminFalse)
+	carol = attribute.NewSet(userCarol, adminFalse)
+	dave  = attribute.NewSet(userDave, adminFalse)
 
 	// Filtered.
 	attrFltr = func(kv attribute.KeyValue) bool {
@@ -45,15 +39,42 @@ var (
 	fltrBob   = attribute.NewSet(userBob)
 
 	// Sat Jan 01 2000 00:00:00 GMT+0000.
-	staticTime    = time.Unix(946684800, 0)
-	staticNowFunc = func() time.Time { return staticTime }
-	// Pass to t.Cleanup to override the now function with staticNowFunc and
-	// revert once the test completes. E.g. t.Cleanup(mockTime(now)).
-	mockTime = func(orig func() time.Time) (cleanup func()) {
-		now = staticNowFunc
-		return func() { now = orig }
-	}
+	y2k = time.Unix(946684800, 0)
 )
+
+// y2kPlus returns the timestamp at n seconds past Sat Jan 01 2000 00:00:00 GMT+0000.
+func y2kPlus(n int64) time.Time {
+	d := time.Duration(n) * time.Second
+	return y2k.Add(d)
+}
+
+// clock is a test clock. It provides a predictable value for now() that can be
+// reset.
+type clock struct {
+	ticks atomic.Int64
+}
+
+// Now returns the mocked time starting at y2kPlus(0). Each call to Now will
+// increment the returned value by one second.
+func (c *clock) Now() time.Time {
+	old := c.ticks.Add(1) - 1
+	return y2kPlus(old)
+}
+
+// Reset resets the clock c to tick from y2kPlus(0).
+func (c *clock) Reset() { c.ticks.Store(0) }
+
+// Register registers clock c's Now method as the now var. It returns an
+// unregister func that should be called to restore the original now value.
+func (c *clock) Register() (unregister func()) {
+	orig := now
+	now = c.Now
+	return func() { now = orig }
+}
+
+func dropExemplars[N int64 | float64](attr attribute.Set) FilteredExemplarReservoir[N] {
+	return dropReservoir[N](attr)
+}
 
 func TestBuilderFilter(t *testing.T) {
 	t.Run("Int64", testBuilderFilter[int64]())
@@ -65,20 +86,21 @@ func testBuilderFilter[N int64 | float64]() func(t *testing.T) {
 		t.Helper()
 
 		value, attr := N(1), alice
-		run := func(b Builder[N], wantA attribute.Set) func(*testing.T) {
+		run := func(b Builder[N], wantF attribute.Set, wantD []attribute.KeyValue) func(*testing.T) {
 			return func(t *testing.T) {
 				t.Helper()
 
-				meas := b.filter(func(_ context.Context, v N, a attribute.Set) {
+				meas := b.filter(func(_ context.Context, v N, f attribute.Set, d []attribute.KeyValue) {
 					assert.Equal(t, value, v, "measured incorrect value")
-					assert.Equal(t, wantA, a, "measured incorrect attributes")
+					assert.Equal(t, wantF, f, "measured incorrect filtered attributes")
+					assert.ElementsMatch(t, wantD, d, "measured incorrect dropped attributes")
 				})
 				meas(context.Background(), value, attr)
 			}
 		}
 
-		t.Run("NoFilter", run(Builder[N]{}, attr))
-		t.Run("Filter", run(Builder[N]{Filter: attrFltr}, fltrAlice))
+		t.Run("NoFilter", run(Builder[N]{}, attr, nil))
+		t.Run("Filter", run(Builder[N]{Filter: attrFltr}, fltrAlice, []attribute.KeyValue{adminTrue}))
 	}
 }
 

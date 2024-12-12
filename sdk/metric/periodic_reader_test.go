@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric // import "go.opentelemetry.io/otel/sdk/metric"
 
@@ -202,8 +191,6 @@ type periodicReaderTestSuite struct {
 }
 
 func (ts *periodicReaderTestSuite) SetupTest() {
-	ts.Reader = ts.Factory()
-
 	e := &fnExporter{
 		exportFunc:   func(context.Context, *metricdata.ResourceMetrics) error { return assert.AnError },
 		flushFunc:    func(context.Context) error { return assert.AnError },
@@ -344,7 +331,8 @@ func TestPeriodicReaderFlushesPending(t *testing.T) {
 					return ctx.Err()
 				}
 				return nil
-			}})
+			},
+		})
 		assert.ErrorIs(t, r.ForceFlush(context.Background()), context.DeadlineExceeded)
 		assert.False(t, *called, "exporter Export method called when it should have failed before export")
 
@@ -396,7 +384,8 @@ func TestPeriodicReaderFlushesPending(t *testing.T) {
 					return ctx.Err()
 				}
 				return nil
-			}})
+			},
+		})
 		assert.ErrorIs(t, r.Shutdown(context.Background()), context.DeadlineExceeded)
 		assert.False(t, *called, "exporter Export method called when it should have failed before export")
 	})
@@ -427,15 +416,16 @@ func TestPeriodicReaderMultipleForceFlush(t *testing.T) {
 	r.register(testSDKProducer{})
 	require.NoError(t, r.ForceFlush(ctx))
 	require.NoError(t, r.ForceFlush(ctx))
+	require.NoError(t, r.Shutdown(ctx))
 }
 
 func BenchmarkPeriodicReader(b *testing.B) {
-	b.Run("Collect", benchReaderCollectFunc(
-		NewPeriodicReader(new(fnExporter)),
-	))
+	r := NewPeriodicReader(new(fnExporter))
+	b.Run("Collect", benchReaderCollectFunc(r))
+	require.NoError(b, r.Shutdown(context.Background()))
 }
 
-func TestPeriodiclReaderTemporality(t *testing.T) {
+func TestPeriodicReaderTemporality(t *testing.T) {
 	tests := []struct {
 		name     string
 		exporter *fnExporter

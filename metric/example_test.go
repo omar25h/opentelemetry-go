@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric_test
 
@@ -18,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"runtime"
 	"time"
@@ -25,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 var meter = otel.Meter("my-service-meter")
@@ -153,6 +143,45 @@ func ExampleMeter_upDownCounter() {
 	}
 }
 
+// Gauges can be used to record non-additive values when changes occur.
+//
+// Here's how you might report the current speed of a cpu fan.
+func ExampleMeter_gauge() {
+	speedGauge, err := meter.Int64Gauge(
+		"cpu.fan.speed",
+		metric.WithDescription("Speed of CPU fan"),
+		metric.WithUnit("RPM"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	getCPUFanSpeed := func() int64 {
+		// Generates a random fan speed for demonstration purpose.
+		// In real world applications, replace this to get the actual fan speed.
+		return int64(1500 + rand.Intn(1000))
+	}
+
+	fanSpeedSubscription := make(chan int64, 1)
+	go func() {
+		defer close(fanSpeedSubscription)
+
+		for idx := 0; idx < 5; idx++ {
+			// Synchronous gauges are used when the measurement cycle is
+			// synchronous to an external change.
+			// Simulate that external cycle here.
+			time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+			fanSpeed := getCPUFanSpeed()
+			fanSpeedSubscription <- fanSpeed
+		}
+	}()
+
+	ctx := context.Background()
+	for fanSpeed := range fanSpeedSubscription {
+		speedGauge.Record(ctx, fanSpeed)
+	}
+}
+
 // Histograms are used to measure a distribution of values over time.
 //
 // Here's how you might report a distribution of response times for an HTTP handler.
@@ -161,6 +190,7 @@ func ExampleMeter_histogram() {
 		"task.duration",
 		metric.WithDescription("The duration of task execution."),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(.005, .01, .025, .05, .075, .1, .25, .5, .75, 1, 2.5, 5, 7.5, 10),
 	)
 	if err != nil {
 		panic(err)
@@ -202,7 +232,7 @@ func ExampleMeter_observableUpDownCounter() {
 	// The function registers asynchronous metrics for the provided db.
 	// Make sure to unregister metric.Registration before closing the provided db.
 	_ = func(db *sql.DB, meter metric.Meter, poolName string) (metric.Registration, error) {
-		max, err := meter.Int64ObservableUpDownCounter(
+		m, err := meter.Int64ObservableUpDownCounter(
 			"db.client.connections.max",
 			metric.WithDescription("The maximum number of open connections allowed."),
 			metric.WithUnit("{connection}"),
@@ -223,11 +253,11 @@ func ExampleMeter_observableUpDownCounter() {
 		reg, err := meter.RegisterCallback(
 			func(_ context.Context, o metric.Observer) error {
 				stats := db.Stats()
-				o.ObserveInt64(max, int64(stats.MaxOpenConnections))
+				o.ObserveInt64(m, int64(stats.MaxOpenConnections))
 				o.ObserveInt64(waitTime, int64(stats.WaitDuration))
 				return nil
 			},
-			max,
+			m,
 			waitTime,
 		)
 		if err != nil {
@@ -276,6 +306,6 @@ func ExampleMeter_attributes() {
 		statusCode := http.StatusOK
 
 		apiCounter.Add(r.Context(), 1,
-			metric.WithAttributes(semconv.HTTPStatusCode(statusCode)))
+			metric.WithAttributes(semconv.HTTPResponseStatusCode(statusCode)))
 	})
 }

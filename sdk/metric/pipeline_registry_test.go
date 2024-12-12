@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric // import "go.opentelemetry.io/otel/sdk/metric"
 
@@ -26,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/metric/internal/aggregate"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
@@ -39,6 +29,7 @@ type invalidAggregation struct{}
 func (invalidAggregation) copy() Aggregation {
 	return invalidAggregation{}
 }
+
 func (invalidAggregation) err() error {
 	return nil
 }
@@ -155,13 +146,14 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 	)
 
 	instruments := []Instrument{
-		{Name: "foo", Kind: InstrumentKind(0)}, //Unknown kind
-		{Name: "foo", Kind: InstrumentKindCounter},
-		{Name: "foo", Kind: InstrumentKindUpDownCounter},
-		{Name: "foo", Kind: InstrumentKindHistogram},
-		{Name: "foo", Kind: InstrumentKindObservableCounter},
-		{Name: "foo", Kind: InstrumentKindObservableUpDownCounter},
-		{Name: "foo", Kind: InstrumentKindObservableGauge},
+		InstrumentKind(0):                     {Name: "foo", Kind: InstrumentKind(0)}, // Unknown kind
+		InstrumentKindCounter:                 {Name: "foo", Kind: InstrumentKindCounter},
+		InstrumentKindUpDownCounter:           {Name: "foo", Kind: InstrumentKindUpDownCounter},
+		InstrumentKindHistogram:               {Name: "foo", Kind: InstrumentKindHistogram},
+		InstrumentKindGauge:                   {Name: "foo", Kind: InstrumentKindGauge},
+		InstrumentKindObservableCounter:       {Name: "foo", Kind: InstrumentKindObservableCounter},
+		InstrumentKindObservableUpDownCounter: {Name: "foo", Kind: InstrumentKindObservableUpDownCounter},
+		InstrumentKindObservableGauge:         {Name: "foo", Kind: InstrumentKindObservableGauge},
 	}
 
 	testcases := []struct {
@@ -178,8 +170,8 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 			validate: func(t *testing.T, meas []aggregate.Measure[N], comps []aggregate.ComputeAggregation, err error) {
 				t.Helper()
 				assert.NoError(t, err)
-				assert.Len(t, meas, 0)
-				assert.Len(t, comps, 0)
+				assert.Empty(t, meas)
+				assert.Empty(t, comps)
 			},
 		},
 		{
@@ -193,6 +185,12 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 			reader:   NewManualReader(WithTemporalitySelector(deltaTemporalitySelector)),
 			inst:     instruments[InstrumentKindHistogram],
 			validate: assertHist[N](metricdata.DeltaTemporality),
+		},
+		{
+			name:     "Default/Delta/Gauge",
+			reader:   NewManualReader(WithTemporalitySelector(deltaTemporalitySelector)),
+			inst:     instruments[InstrumentKindGauge],
+			validate: assertLastValue[N],
 		},
 		{
 			name:     "Default/Delta/PrecomputedSum/Monotonic",
@@ -229,6 +227,12 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 			reader:   NewManualReader(),
 			inst:     instruments[InstrumentKindHistogram],
 			validate: assertHist[N](metricdata.CumulativeTemporality),
+		},
+		{
+			name:     "Default/Cumulative/Gauge",
+			reader:   NewManualReader(),
+			inst:     instruments[InstrumentKindGauge],
+			validate: assertLastValue[N],
 		},
 		{
 			name:     "Default/Cumulative/PrecomputedSum/Monotonic",
@@ -318,6 +322,12 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 			validate: assertHist[N](metricdata.CumulativeTemporality),
 		},
 		{
+			name:     "Reader/Default/Cumulative/Gauge",
+			reader:   NewManualReader(WithAggregationSelector(func(ik InstrumentKind) Aggregation { return AggregationDefault{} })),
+			inst:     instruments[InstrumentKindGauge],
+			validate: assertLastValue[N],
+		},
+		{
 			name:     "Reader/Default/Cumulative/PrecomputedSum/Monotonic",
 			reader:   NewManualReader(WithAggregationSelector(func(ik InstrumentKind) Aggregation { return AggregationDefault{} })),
 			inst:     instruments[InstrumentKindObservableCounter],
@@ -348,9 +358,10 @@ func testCreateAggregators[N int64 | float64](t *testing.T) {
 	for _, tt := range testcases {
 		t.Run(tt.name, func(t *testing.T) {
 			var c cache[string, instID]
-			p := newPipeline(nil, tt.reader, tt.views)
+			p := newPipeline(nil, tt.reader, tt.views, exemplar.AlwaysOffFilter)
 			i := newInserter[N](p, &c)
-			input, err := i.Instrument(tt.inst)
+			readerAggregation := i.readerDefaultAggregation(tt.inst.Kind)
+			input, err := i.Instrument(tt.inst, readerAggregation)
 			var comps []aggregate.ComputeAggregation
 			for _, instSyncs := range p.aggregations {
 				for _, i := range instSyncs {
@@ -369,12 +380,13 @@ func TestCreateAggregators(t *testing.T) {
 
 func testInvalidInstrumentShouldPanic[N int64 | float64]() {
 	var c cache[string, instID]
-	i := newInserter[N](newPipeline(nil, NewManualReader(), []View{defaultView}), &c)
+	i := newInserter[N](newPipeline(nil, NewManualReader(), []View{defaultView}, exemplar.AlwaysOffFilter), &c)
 	inst := Instrument{
 		Name: "foo",
 		Kind: InstrumentKind(255),
 	}
-	_, _ = i.Instrument(inst)
+	readerAggregation := i.readerDefaultAggregation(inst.Kind)
+	_, _ = i.Instrument(inst, readerAggregation)
 }
 
 func TestInvalidInstrumentShouldPanic(t *testing.T) {
@@ -384,7 +396,7 @@ func TestInvalidInstrumentShouldPanic(t *testing.T) {
 
 func TestPipelinesAggregatorForEachReader(t *testing.T) {
 	r0, r1 := NewManualReader(), NewManualReader()
-	pipes := newPipelines(resource.Empty(), []Reader{r0, r1}, nil)
+	pipes := newPipelines(resource.Empty(), []Reader{r0, r1}, nil, exemplar.AlwaysOffFilter)
 	require.Len(t, pipes, 2, "created pipelines")
 
 	inst := Instrument{Name: "foo", Kind: InstrumentKindCounter}
@@ -456,9 +468,11 @@ func TestPipelineRegistryCreateAggregators(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			p := newPipelines(resource.Empty(), tt.readers, tt.views)
+			p := newPipelines(resource.Empty(), tt.readers, tt.views, exemplar.AlwaysOffFilter)
 			testPipelineRegistryResolveIntAggregators(t, p, tt.wantCount)
 			testPipelineRegistryResolveFloatAggregators(t, p, tt.wantCount)
+			testPipelineRegistryResolveIntHistogramAggregators(t, p, tt.wantCount)
+			testPipelineRegistryResolveFloatHistogramAggregators(t, p, tt.wantCount)
 		})
 	}
 }
@@ -483,12 +497,32 @@ func testPipelineRegistryResolveFloatAggregators(t *testing.T, p pipelines, want
 	require.Len(t, aggs, wantCount)
 }
 
+func testPipelineRegistryResolveIntHistogramAggregators(t *testing.T, p pipelines, wantCount int) {
+	inst := Instrument{Name: "foo", Kind: InstrumentKindCounter}
+	var c cache[string, instID]
+	r := newResolver[int64](p, &c)
+	aggs, err := r.HistogramAggregators(inst, []float64{1, 2, 3})
+	assert.NoError(t, err)
+
+	require.Len(t, aggs, wantCount)
+}
+
+func testPipelineRegistryResolveFloatHistogramAggregators(t *testing.T, p pipelines, wantCount int) {
+	inst := Instrument{Name: "foo", Kind: InstrumentKindCounter}
+	var c cache[string, instID]
+	r := newResolver[float64](p, &c)
+	aggs, err := r.HistogramAggregators(inst, []float64{1, 2, 3})
+	assert.NoError(t, err)
+
+	require.Len(t, aggs, wantCount)
+}
+
 func TestPipelineRegistryResource(t *testing.T) {
 	v := NewView(Instrument{Name: "bar"}, Stream{Name: "foo"})
 	readers := []Reader{NewManualReader()}
 	views := []View{defaultView, v}
 	res := resource.NewSchemaless(attribute.String("key", "val"))
-	pipes := newPipelines(res, readers, views)
+	pipes := newPipelines(res, readers, views, exemplar.AlwaysOffFilter)
 	for _, p := range pipes {
 		assert.True(t, res.Equal(p.resource), "resource not set")
 	}
@@ -499,19 +533,27 @@ func TestPipelineRegistryCreateAggregatorsIncompatibleInstrument(t *testing.T) {
 
 	readers := []Reader{testRdrHistogram}
 	views := []View{defaultView}
-	p := newPipelines(resource.Empty(), readers, views)
+	p := newPipelines(resource.Empty(), readers, views, exemplar.AlwaysOffFilter)
 	inst := Instrument{Name: "foo", Kind: InstrumentKindObservableGauge}
 
 	var vc cache[string, instID]
 	ri := newResolver[int64](p, &vc)
 	intAggs, err := ri.Aggregators(inst)
 	assert.Error(t, err)
-	assert.Len(t, intAggs, 0)
+	assert.Empty(t, intAggs)
 
 	rf := newResolver[float64](p, &vc)
 	floatAggs, err := rf.Aggregators(inst)
 	assert.Error(t, err)
-	assert.Len(t, floatAggs, 0)
+	assert.Empty(t, floatAggs)
+
+	intAggs, err = ri.HistogramAggregators(inst, []float64{1, 2, 3})
+	assert.Error(t, err)
+	assert.Empty(t, intAggs)
+
+	floatAggs, err = rf.HistogramAggregators(inst, []float64{1, 2, 3})
+	assert.Error(t, err)
+	assert.Empty(t, floatAggs)
 }
 
 type logCounter struct {
@@ -551,7 +593,7 @@ func TestResolveAggregatorsDuplicateErrors(t *testing.T) {
 	fooInst := Instrument{Name: "foo", Kind: InstrumentKindCounter}
 	barInst := Instrument{Name: "bar", Kind: InstrumentKindCounter}
 
-	p := newPipelines(resource.Empty(), readers, views)
+	p := newPipelines(resource.Empty(), readers, views, exemplar.AlwaysOffFilter)
 
 	var vc cache[string, instID]
 	ri := newResolver[int64](p, &vc)
@@ -675,6 +717,32 @@ func TestIsAggregatorCompatible(t *testing.T) {
 		{
 			name: "SyncHistogram and ExponentialHistogram",
 			kind: InstrumentKindHistogram,
+			agg:  AggregationBase2ExponentialHistogram{},
+		},
+		{
+			name: "SyncGauge and Drop",
+			kind: InstrumentKindGauge,
+			agg:  AggregationDrop{},
+		},
+		{
+			name: "SyncGauge and LastValue",
+			kind: InstrumentKindGauge,
+			agg:  AggregationLastValue{},
+		},
+		{
+			name: "SyncGauge and Sum",
+			kind: InstrumentKindGauge,
+			agg:  AggregationSum{},
+			want: errIncompatibleAggregation,
+		},
+		{
+			name: "SyncGauge and ExplicitBucketHistogram",
+			kind: InstrumentKindGauge,
+			agg:  AggregationExplicitBucketHistogram{},
+		},
+		{
+			name: "SyncGauge and ExponentialHistogram",
+			kind: InstrumentKindGauge,
 			agg:  AggregationBase2ExponentialHistogram{},
 		},
 		{

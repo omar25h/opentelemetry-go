@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package stdoutmetric_test // import "go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 
@@ -39,8 +28,7 @@ func testEncoderOption() stdoutmetric.Option {
 func testCtxErrHonored(factory func(*testing.T) func(context.Context) error) func(t *testing.T) {
 	return func(t *testing.T) {
 		t.Helper()
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
+		ctx := context.Background()
 
 		t.Run("DeadlineExceeded", func(t *testing.T) {
 			innerCtx, innerCancel := context.WithTimeout(ctx, time.Nanosecond)
@@ -66,19 +54,27 @@ func testCtxErrHonored(factory func(*testing.T) func(context.Context) error) fun
 	}
 }
 
-func TestExporterHonorsContextErrors(t *testing.T) {
-	t.Run("Shutdown", testCtxErrHonored(func(t *testing.T) func(context.Context) error {
-		exp, err := stdoutmetric.New(testEncoderOption())
-		require.NoError(t, err)
-		return exp.Shutdown
-	}))
+func testCtxErrIgnored(factory func(*testing.T) func(context.Context) error) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		ctx := context.Background()
 
-	t.Run("ForceFlush", testCtxErrHonored(func(t *testing.T) func(context.Context) error {
-		exp, err := stdoutmetric.New(testEncoderOption())
-		require.NoError(t, err)
-		return exp.ForceFlush
-	}))
+		t.Run("Canceled Ignored", func(t *testing.T) {
+			innerCtx, innerCancel := context.WithCancel(ctx)
+			innerCancel()
 
+			f := factory(t)
+			assert.NoError(t, f(innerCtx))
+		})
+
+		t.Run("NoError", func(t *testing.T) {
+			f := factory(t)
+			assert.NoError(t, f(ctx))
+		})
+	}
+}
+
+func TestExporterExportHonorsContextErrors(t *testing.T) {
 	t.Run("Export", testCtxErrHonored(func(t *testing.T) func(context.Context) error {
 		exp, err := stdoutmetric.New(testEncoderOption())
 		require.NoError(t, err)
@@ -86,6 +82,22 @@ func TestExporterHonorsContextErrors(t *testing.T) {
 			data := new(metricdata.ResourceMetrics)
 			return exp.Export(ctx, data)
 		}
+	}))
+}
+
+func TestExporterForceFlushIgnoresContextErrors(t *testing.T) {
+	t.Run("ForceFlush", testCtxErrIgnored(func(t *testing.T) func(context.Context) error {
+		exp, err := stdoutmetric.New(testEncoderOption())
+		require.NoError(t, err)
+		return exp.ForceFlush
+	}))
+}
+
+func TestExporterShutdownIgnoresContextErrors(t *testing.T) {
+	t.Run("Shutdown", testCtxErrIgnored(func(t *testing.T) func(context.Context) error {
+		exp, err := stdoutmetric.New(testEncoderOption())
+		require.NoError(t, err)
+		return exp.Shutdown
 	}))
 }
 

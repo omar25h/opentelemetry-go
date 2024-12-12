@@ -2,18 +2,7 @@
 // source: internal/shared/otlp/otlpmetric/otest/client.go.tmpl
 
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otest // import "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc/internal/otest"
 
@@ -29,7 +18,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"go.opentelemetry.io/otel"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	collpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	cpb "go.opentelemetry.io/proto/otlp/common/v1"
 	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -38,7 +27,7 @@ import (
 
 var (
 	// Sat Jan 01 2000 00:00:00 GMT+0000.
-	start = time.Date(2000, time.January, 01, 0, 0, 0, 0, time.FixedZone("GMT", 0))
+	start = time.Date(2000, time.January, 0o1, 0, 0, 0, 0, time.FixedZone("GMT", 0))
 	end   = start.Add(30 * time.Second)
 
 	kvAlice = &cpb.KeyValue{Key: "user", Value: &cpb.AnyValue{
@@ -54,8 +43,8 @@ var (
 		Value: &cpb.AnyValue_StringValue{StringValue: "v0.1.0"},
 	}}
 
-	min, max, sum = 2.0, 4.0, 90.0
-	hdp           = []*mpb.HistogramDataPoint{
+	mi, ma, sum = 2.0, 4.0, 90.0
+	hdp         = []*mpb.HistogramDataPoint{
 		{
 			Attributes:        []*cpb.KeyValue{kvAlice},
 			StartTimeUnixNano: uint64(start.UnixNano()),
@@ -64,8 +53,8 @@ var (
 			Sum:               &sum,
 			ExplicitBounds:    []float64{1, 5},
 			BucketCounts:      []uint64{0, 30, 0},
-			Min:               &min,
-			Max:               &max,
+			Min:               &mi,
+			Max:               &ma,
 		},
 	}
 
@@ -219,11 +208,11 @@ func RunClientTests(f ClientFactory) func(*testing.T) {
 			require.NoError(t, client.ForceFlush(ctx))
 			rm := collector.Collect().Dump()
 			// Data correctness is not important, just it was received.
-			require.Greater(t, len(rm), 0, "no data uploaded")
+			require.NotEmpty(t, rm, "no data uploaded")
 
 			require.NoError(t, client.Shutdown(ctx))
 			rm = collector.Collect().Dump()
-			assert.Len(t, rm, 0, "client did not flush all data")
+			assert.Empty(t, rm, "client did not flush all data")
 		})
 
 		t.Run("UploadMetrics", func(t *testing.T) {
@@ -280,7 +269,7 @@ func RunClientTests(f ClientFactory) func(*testing.T) {
 			require.NoError(t, client.UploadMetrics(ctx, resourceMetrics))
 			require.NoError(t, client.Shutdown(ctx))
 
-			require.Equal(t, 1, len(errs))
+			require.Len(t, errs, 1)
 			want := fmt.Sprintf("%s (%d metric data points rejected)", msg, n)
 			assert.ErrorContains(t, errs[0], want)
 		})

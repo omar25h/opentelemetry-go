@@ -1,10 +1,10 @@
 module go.opentelemetry.io/otel/schema
 
-go 1.20
+go 1.22
 
 require (
-	github.com/Masterminds/semver/v3 v3.2.1
-	github.com/stretchr/testify v1.8.4
+	github.com/Masterminds/semver/v3 v3.3.1
+	github.com/stretchr/testify v1.10.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

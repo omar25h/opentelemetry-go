@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric_test
 
@@ -24,8 +13,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
 
 // To enable metrics in your application using the SDK,
@@ -249,5 +239,48 @@ func ExampleNewView_exponentialHistogram() {
 	// SDK using the WithView option.
 	_ = metric.NewMeterProvider(
 		metric.WithView(view),
+	)
+}
+
+func ExampleNewView_exemplarreservoirproviderselector() {
+	// Create a view that makes all metrics use a different exemplar reservoir.
+	view := metric.NewView(
+		metric.Instrument{Name: "*"},
+		metric.Stream{
+			ExemplarReservoirProviderSelector: func(agg metric.Aggregation) exemplar.ReservoirProvider {
+				// This example uses a fixed-size reservoir with a size of 10
+				// for explicit bucket histograms instead of the default
+				// bucket-aligned reservoir.
+				if _, ok := agg.(metric.AggregationExplicitBucketHistogram); ok {
+					return exemplar.FixedSizeReservoirProvider(10)
+				}
+				// Fall back to the default reservoir otherwise.
+				return metric.DefaultExemplarReservoirProviderSelector(agg)
+			},
+		},
+	)
+
+	// The created view can then be registered with the OpenTelemetry metric
+	// SDK using the WithView option.
+	_ = metric.NewMeterProvider(
+		metric.WithView(view),
+	)
+}
+
+func ExampleWithExemplarFilter_disabled() {
+	// Use exemplar.AlwaysOffFilter to disable exemplar collection.
+	_ = metric.NewMeterProvider(
+		metric.WithExemplarFilter(exemplar.AlwaysOffFilter),
+	)
+}
+
+func ExampleWithExemplarFilter_custom() {
+	// Create a custom filter function that only offers measurements if the
+	// context has an error.
+	customFilter := func(ctx context.Context) bool {
+		return ctx.Err() != nil
+	}
+	_ = metric.NewMeterProvider(
+		metric.WithExemplarFilter(customFilter),
 	)
 }

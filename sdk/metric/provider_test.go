@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric
 
@@ -26,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	api "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -106,6 +96,7 @@ func TestMeterProviderReturnsSameMeter(t *testing.T) {
 
 	assert.Same(t, mtr, mp.Meter(""))
 	assert.NotSame(t, mtr, mp.Meter("diff"))
+	assert.NotSame(t, mtr, mp.Meter("", api.WithInstrumentationAttributes(attribute.String("k", "v"))))
 }
 
 func TestEmptyMeterName(t *testing.T) {
@@ -178,8 +169,8 @@ func TestMeterProviderMixingOnRegisterErrors(t *testing.T) {
 
 	err = rdr1.Collect(context.Background(), &data)
 	assert.NoError(t, err, "Errored when collect should be a noop")
-	assert.Len(
-		t, data.ScopeMetrics, 0,
+	assert.Empty(
+		t, data.ScopeMetrics,
 		"Metrics produced for instrument collected by different MeterProvider",
 	)
 }

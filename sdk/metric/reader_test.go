@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metric // import "go.opentelemetry.io/otel/sdk/metric"
 
@@ -128,7 +117,7 @@ func (ts *readerTestSuite) TestExternalProducerPartialSuccess() {
 
 	m := metricdata.ResourceMetrics{}
 	err := ts.Reader.Collect(context.Background(), &m)
-	ts.Equal(assert.AnError, err)
+	ts.ErrorIs(err, assert.AnError)
 	ts.Equal(testResourceMetricsAB, m)
 }
 
@@ -138,7 +127,8 @@ func (ts *readerTestSuite) TestSDKFailureBlocksExternalProducer() {
 		produceFunc: func(ctx context.Context, rm *metricdata.ResourceMetrics) error {
 			*rm = metricdata.ResourceMetrics{}
 			return assert.AnError
-		}})
+		},
+	})
 
 	m := metricdata.ResourceMetrics{}
 	err := ts.Reader.Collect(context.Background(), &m)
@@ -208,7 +198,7 @@ func (ts *readerTestSuite) TestShutdownBeforeRegister() {
 func (ts *readerTestSuite) TestCollectNilResourceMetricError() {
 	ts.Reader = ts.Factory()
 	ctx := context.Background()
-	ts.Assert().Error(ts.Reader.Collect(ctx, nil))
+	ts.Error(ts.Reader.Collect(ctx, nil))
 }
 
 var testScopeMetricsA = metricdata.ScopeMetrics{
@@ -310,6 +300,7 @@ func TestDefaultAggregationSelector(t *testing.T) {
 		InstrumentKindCounter,
 		InstrumentKindUpDownCounter,
 		InstrumentKindHistogram,
+		InstrumentKindGauge,
 		InstrumentKindObservableCounter,
 		InstrumentKindObservableUpDownCounter,
 		InstrumentKindObservableGauge,
@@ -327,6 +318,7 @@ func TestDefaultTemporalitySelector(t *testing.T) {
 		InstrumentKindCounter,
 		InstrumentKindUpDownCounter,
 		InstrumentKindHistogram,
+		InstrumentKindGauge,
 		InstrumentKindObservableCounter,
 		InstrumentKindObservableUpDownCounter,
 		InstrumentKindObservableGauge,

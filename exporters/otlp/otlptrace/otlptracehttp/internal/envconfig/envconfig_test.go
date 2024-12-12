@@ -2,18 +2,7 @@
 // source: internal/shared/otlp/envconfig/envconfig_test.go.tmpl
 
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package envconfig
 
@@ -282,6 +271,53 @@ func TestEnvConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "with percent-encoded headers",
+			reader: EnvOptionsReader{
+				GetEnv: func(n string) string {
+					if n == "HELLO" {
+						return "user%2Did=42,user%20name=alice%20smith"
+					}
+					return ""
+				},
+			},
+			configs: []ConfigFn{
+				WithHeaders("HELLO", func(v map[string]string) {
+					options = append(options, testOption{TestHeaders: v})
+				}),
+			},
+			expectedOptions: []testOption{
+				{
+					TestHeaders: map[string]string{
+						"user%2Did":   "42",
+						"user%20name": "alice smith",
+					},
+				},
+			},
+		},
+		{
+			name: "with invalid header key",
+			reader: EnvOptionsReader{
+				GetEnv: func(n string) string {
+					if n == "HELLO" {
+						return "valid-key=value,invalid key=value"
+					}
+					return ""
+				},
+			},
+			configs: []ConfigFn{
+				WithHeaders("HELLO", func(v map[string]string) {
+					options = append(options, testOption{TestHeaders: v})
+				}),
+			},
+			expectedOptions: []testOption{
+				{
+					TestHeaders: map[string]string{
+						"valid-key": "value",
+					},
+				},
+			},
+		},
+		{
 			name: "with URL",
 			reader: EnvOptionsReader{
 				GetEnv: func(n string) string {
@@ -427,12 +463,27 @@ func TestStringToHeader(t *testing.T) {
 			want:  map[string]string{"userId": "alice"},
 		},
 		{
-			name:  "multiples headers encoded",
+			name:  "simple header conforms to RFC 3986 spec",
+			value: " userId = alice+test ",
+			want:  map[string]string{"userId": "alice+test"},
+		},
+		{
+			name:  "multiple headers encoded",
 			value: "userId=alice,serverNode=DF%3A28,isProduction=false",
 			want: map[string]string{
 				"userId":       "alice",
 				"serverNode":   "DF:28",
 				"isProduction": "false",
+			},
+		},
+		{
+			name:  "multiple headers encoded per RFC 3986 spec",
+			value: "userId=alice+test,serverNode=DF%3A28,isProduction=false,namespace=localhost/test",
+			want: map[string]string{
+				"userId":       "alice+test",
+				"serverNode":   "DF:28",
+				"isProduction": "false",
+				"namespace":    "localhost/test",
 			},
 		},
 		{
@@ -444,6 +495,7 @@ func TestStringToHeader(t *testing.T) {
 			name:  "invalid key",
 			value: "%XX=missing,userId=alice",
 			want: map[string]string{
+				"%XX":    "missing",
 				"userId": "alice",
 			},
 		},
